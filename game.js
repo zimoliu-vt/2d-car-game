@@ -23,23 +23,25 @@ const LANE_DIAGONAL_DURATION = 0.18;
 const LANE_STRAIGHTEN_DURATION = 0.09;
 const PLAYER_TURN_ANGLE_MAX = 0.24;
 const PLAYER_DIAGONAL_LIFT = 12;
+/** How fast the car eases between top/bottom rail when switching forward ↔ reverse (higher = snappier). */
+const PLAYER_RAIL_SMOOTH_RATE = 7;
 const TRAILER_SWING_MAX = 0.32;
 const TRAILER_FOLLOW_RATE = 7.5;
 const TRAILER_TURN_INERTIA = 0.95;
-const PLAYER_SPEED_MAX_KMH = 200;
-const PLAYER_ACCEL_KMH_PER_SEC = 95;
-/** Scale so at ±200 km/h the game pace matches the old ~speedFactor 1 feel. */
-const DT_SPEED_REF_KMH = PLAYER_SPEED_MAX_KMH;
+const PLAYER_SPEED_MAX_KMH = 400;
+const PLAYER_ACCEL_KMH_PER_SEC = 118;
+/** Pace scales with |speedKmh| / this value (200 ≈ baseline “full” pace; cap 400 km/h). */
+const DT_SPEED_REF_KMH = 200;
 const DT_SPEED_FLOOR = 0.22;
 const NPC_ACCELERATION = 120;
 const NPC_BRAKE_DECELERATION = 260;
-const NPC_MIN_GAP = 26;
-const NPC_TIME_HEADWAY = 0.45;
-const NPC_TOP_SPAWN_GAP = 130;
+const NPC_MIN_GAP = 52;
+const NPC_TIME_HEADWAY = 0.62;
+const NPC_TOP_SPAWN_GAP = 185;
 // ~1 in 20 NPCs may attempt discretionary lane changes; blocked traffic still merges.
 const NPC_RANDOM_LANE_ELIGIBLE_FRACTION = 1 / 20;
 const NPC_RANDOM_LANE_ATTEMPT_PER_SEC = 0.06;
-const NPC_LANE_CHANGE_MIN_GAP = 95;
+const NPC_LANE_CHANGE_MIN_GAP = 130;
 const NPC_PLAYER_LANE_CHANGE_CLEARANCE = 130;
 const NPC_LANE_CHANGE_X_SPEED = 220;
 const ASSET_BASE = "./Assets/2D TOP DOWN PIXEL CARS";
@@ -259,7 +261,7 @@ const game = {
   score: 0,
   best: Number(localStorage.getItem("carGameBest") || 0),
   speed: 230,
-  speedKmh: 72,
+  speedKmh: 88,
   spawnTimer: 0,
   spawnInterval: 0.75,
   laneOffset: 0,
@@ -283,12 +285,22 @@ const game = {
       direction: 0,
       fromX: 0,
       toX: 0,
+      startBaseY: 0,
       diagonalY: 0,
+      backing: false,
     },
   },
   enemies: [],
   lastFrame: 0,
 };
+
+function getPlayerBaseY() {
+  const margin = isPlayerTruck && isPlayerTrailerEnabled ? 130 : 110;
+  return game.speedKmh >= 0 ? canvas.height - margin : margin;
+}
+
+game.player.baseY = getPlayerBaseY();
+game.player.y = game.player.baseY;
 
 bestEl.textContent = String(game.best);
 updateHud();
@@ -297,14 +309,14 @@ setRadioChannelName(RADIO_STATIONS[currentStationIndex].name);
 function resetGame() {
   game.score = 0;
   game.speed = 230;
-  game.speedKmh = 72;
+  game.speedKmh = 88;
   game.spawnTimer = 0;
   game.spawnInterval = 0.75;
   game.laneOffset = 0;
   game.player.lane = 1;
   game.player.targetLane = 1;
   game.player.x = laneCenter(game.player.lane) - PLAYER_SIZE.w / 2;
-  game.player.baseY = canvas.height - (isPlayerTruck && isPlayerTrailerEnabled ? 130 : 110);
+  game.player.baseY = getPlayerBaseY();
   game.player.y = game.player.baseY;
   game.player.turnAngle = 0;
   game.player.trailerAngle = 0;
@@ -394,7 +406,11 @@ function beginLaneChange(nextLane) {
   p.laneChange.direction = direction;
   p.laneChange.fromX = p.x;
   p.laneChange.toX = laneCenter(nextLane) - PLAYER_SIZE.w / 2;
-  p.laneChange.diagonalY = p.baseY - PLAYER_DIAGONAL_LIFT;
+  p.laneChange.startBaseY = p.y;
+  const backing = game.speedKmh < 0;
+  p.laneChange.backing = backing;
+  p.laneChange.diagonalY =
+    p.laneChange.startBaseY + (backing ? PLAYER_DIAGONAL_LIFT : -PLAYER_DIAGONAL_LIFT);
 }
 
 function requestLaneChange(direction) {
@@ -474,37 +490,51 @@ function update(dt) {
   const travelSign = game.speedKmh >= 0 ? 1 : -1;
   const dtSteer = dt;
   const previousTurnAngle = p.turnAngle;
+
+  if (!p.laneChange.active) {
+    const targetY = getPlayerBaseY();
+    p.baseY = targetY;
+    p.y += (targetY - p.y) * Math.min(1, PLAYER_RAIL_SMOOTH_RATE * dt);
+    if (Math.abs(targetY - p.y) < 0.4) {
+      p.y = targetY;
+    }
+  }
+
   if (p.laneChange.active) {
     const change = p.laneChange;
     change.timer += dtSteer;
 
+    const steerSign = change.backing ? -1 : 1;
+
     if (change.phase === "turn") {
       const t = Math.min(change.timer / LANE_TURN_DURATION, 1);
-      p.turnAngle = change.direction * PLAYER_TURN_ANGLE_MAX * t;
+      p.turnAngle = change.direction * PLAYER_TURN_ANGLE_MAX * t * steerSign;
       p.x = change.fromX;
-      p.y = p.baseY;
+      p.y = change.startBaseY;
       if (t >= 1) {
         change.phase = "diagonal";
         change.timer = 0;
       }
     } else if (change.phase === "diagonal") {
       const t = Math.min(change.timer / LANE_DIAGONAL_DURATION, 1);
-      p.turnAngle = change.direction * PLAYER_TURN_ANGLE_MAX;
+      p.turnAngle = change.direction * PLAYER_TURN_ANGLE_MAX * steerSign;
       p.x = lerp(change.fromX, change.toX, t);
-      p.y = lerp(p.baseY, change.diagonalY, t);
+      p.y = lerp(change.startBaseY, change.diagonalY, t);
       if (t >= 1) {
         change.phase = "straighten";
         change.timer = 0;
       }
     } else if (change.phase === "straighten") {
       const t = Math.min(change.timer / LANE_STRAIGHTEN_DURATION, 1);
-      p.turnAngle = change.direction * PLAYER_TURN_ANGLE_MAX * (1 - t);
+      const endBaseY = getPlayerBaseY();
+      p.turnAngle = change.direction * PLAYER_TURN_ANGLE_MAX * (1 - t) * steerSign;
       p.x = change.toX;
-      p.y = lerp(change.diagonalY, p.baseY, t);
+      p.y = lerp(change.diagonalY, endBaseY, t);
       if (t >= 1) {
         p.lane = p.targetLane;
         p.x = change.toX;
-        p.y = p.baseY;
+        p.baseY = endBaseY;
+        p.y = endBaseY;
         p.turnAngle = 0;
         change.active = false;
         change.phase = "idle";
@@ -637,7 +667,9 @@ function update(dt) {
   game.enemies = game.enemies.filter((enemy) =>
     forward ? enemy.y < canvas.height + ENEMY_SIZE.h : enemy.y > -ENEMY_SIZE.h
   );
-  const laneScroll = (game.speed * 0.7 + game.speedKmh * 0.8) * dtBoosted;
+  const roadScrollSign = game.speedKmh >= 0 ? 1 : -1;
+  const laneScroll =
+    (game.speed * 0.7 + Math.abs(game.speedKmh) * 0.8) * dtBoosted * roadScrollSign;
   game.laneOffset = ((game.laneOffset + laneScroll) % 50 + 50) % 50;
   updateHud();
 }

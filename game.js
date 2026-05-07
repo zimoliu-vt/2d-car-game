@@ -350,7 +350,14 @@ function endGame() {
 }
 
 function updateHud() {
-  scoreEl.textContent = String(Math.floor(game.score));
+  const currentScore = Math.floor(game.score);
+  scoreEl.textContent = String(currentScore);
+
+  if (currentScore > game.best) {
+    game.best = currentScore;
+    localStorage.setItem("carGameBest", String(game.best));
+  }
+
   bestEl.textContent = String(game.best);
   if (speedKmhEl) {
     speedKmhEl.textContent = `${Math.round(game.speedKmh)} km/h`;
